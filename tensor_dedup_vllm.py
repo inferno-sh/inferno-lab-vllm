@@ -33,7 +33,7 @@ MAX_TOKENS = 80
 TEMPERATURE = 0.6
 MODEL_IDS: List[str] = [
     "Qwen/Qwen2-0.5B",
-    "Qwen/Qwen2-0.5B-Instruct",
+    "Qwen/Qwen2-0.5B",  # Same model twice to demonstrate dedup
 ]
 GPU_MEMORY_UTILIZATION = 0.45
 ENABLE_TENSOR_DEDUP = os.environ.get("ENABLE_TENSOR_DEDUP", "1") == "1"
