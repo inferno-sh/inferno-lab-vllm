@@ -22,6 +22,24 @@ logger = init_logger(__name__)
 
 @config
 @dataclass
+class TensorDedupConfig:
+    """Configuration for automatically deduplicating identical tensors."""
+
+    enabled: bool = False
+    """Whether tensor deduplication is enabled."""
+    hash_algorithm: str = "blake2b"
+    """Hashing algorithm to fingerprint tensor bytes. Defaults to blake2b;
+    `xxhash64` is also supported when the optional dependency is installed."""
+    verify_bytes: bool = False
+    """When True, performs a byte-by-byte comparison before reusing a cached
+    tensor to guard against extremely unlikely hash collisions."""
+    min_tensor_bytes: int = 0
+    """Skip deduplication for tensors smaller than this many bytes. Useful when
+    only large layers are worth hashing."""
+
+
+@config
+@dataclass
 class LoadConfig:
     """Configuration for loading the model weights."""
 
@@ -79,6 +97,11 @@ class LoadConfig:
     """Whether to enable tqdm for showing progress bar when loading model
     weights."""
     pt_load_map_location: str | dict[str, str] = "cpu"
+    tensor_dedup: TensorDedupConfig | None = None
+    """Optional description of the tensor deduplication strategy. When provided
+    and enabled, weights with identical shapes, dtypes, and hashes will share
+    storage within the current process."""
+
     """
     pt_load_map_location: the map location for loading pytorch checkpoint, to
     support loading checkpoints can only be loaded on certain devices like
