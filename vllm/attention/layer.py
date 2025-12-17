@@ -410,16 +410,22 @@ class Attention(nn.Module, AttentionLayerBase):
         Set per-head channel masks to be applied to key/value before attention.
         mask_* expected shape: [num_kv_heads, head_size] or broadcastable.
         """
-        self.channel_mask_k = (
-            mask_k.view(1, self.num_kv_heads, self.head_size)
-            if mask_k is not None
-            else None
-        )
-        self.channel_mask_v = (
-            mask_v.view(1, self.num_kv_heads, self.head_size)
-            if mask_v is not None
-            else None
-        )
+        if mask_k is not None:
+            if mask_k.numel() == self.head_size:
+                mask_k = mask_k.view(1, 1, self.head_size).expand(
+                    1, self.num_kv_heads, self.head_size
+                )
+            else:
+                mask_k = mask_k.view(1, self.num_kv_heads, self.head_size)
+        if mask_v is not None:
+            if mask_v.numel() == self.head_size:
+                mask_v = mask_v.view(1, 1, self.head_size).expand(
+                    1, self.num_kv_heads, self.head_size
+                )
+            else:
+                mask_v = mask_v.view(1, self.num_kv_heads, self.head_size)
+        self.channel_mask_k = mask_k
+        self.channel_mask_v = mask_v
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         self.impl.process_weights_after_loading(act_dtype)

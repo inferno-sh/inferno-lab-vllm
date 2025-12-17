@@ -118,9 +118,40 @@ class WorkerBase:
         """Apply a function on the model inside this worker."""
         return fn(self.get_model())
 
+    def set_channel_masks(
+        self, mask_k: list[float] | None, mask_v: list[float] | None
+    ) -> None:
+        """
+        Apply per-head channel masks to attention modules that expose
+        `set_channel_masks`. Masks are provided as flat Python lists to avoid
+        serialization issues and are rebuilt as tensors on the worker device.
+        """
+        mask_k_tensor = (
+            torch.tensor(mask_k, dtype=torch.float32, device=self.device)
+            if mask_k is not None
+            else None
+        )
+        mask_v_tensor = (
+            torch.tensor(mask_v, dtype=torch.float32, device=self.device)
+            if mask_v is not None
+            else None
+        )
+        model = self.get_model()
+        for mod in model.modules():
+            if hasattr(mod, "set_channel_masks"):
+                mod.set_channel_masks(mask_k_tensor, mask_v_tensor)  # type: ignore[attr-defined]
+
     def load_model(self) -> None:
         """Load model onto target device."""
         raise NotImplementedError
+
+    def get_head_size(self) -> int:
+        """Return the attention head size from the first module exposing it."""
+        model = self.get_model()
+        for mod in model.modules():
+            if hasattr(mod, "head_size"):
+                return int(getattr(mod, "head_size"))
+        raise RuntimeError("No attention module with head_size found.")
 
     def execute_model(
         self, scheduler_output: SchedulerOutput

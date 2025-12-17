@@ -49,28 +49,17 @@ class VLLMBackend:
             pass
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         self.llm = LLM(model=model_name)
-        # Try to locate the loaded model to install masks.
-        model = None
-        try:
-            model = (
-                self.llm.llm_engine.model_executor.driver_worker.model_runner.model  # type: ignore[attr-defined]
-            )
-        except Exception:
-            LOG.warning(
-                "Could not locate model runner to set masks; masking may be skipped."
-            )
-        self.model = model
-        if self.model is not None:
-            self.attn_modules = _find_attention_modules(self.model)
-            LOG.info(
-                "Found %d attention modules with masking hooks.", len(self.attn_modules)
-            )
-        else:
-            self.attn_modules = []
 
     def _apply_masks(self, mask_k: torch.Tensor | None, mask_v: torch.Tensor | None):
-        for mod in self.attn_modules:
-            mod.set_channel_masks(mask_k, mask_v)
+        """
+        Dispatch mask application into worker processes via apply_model.
+        """
+
+        mask_k_list = mask_k.tolist() if mask_k is not None else None
+        mask_v_list = mask_v.tolist() if mask_v is not None else None
+        self.llm.llm_engine.collective_rpc(
+            "set_channel_masks", args=(mask_k_list, mask_v_list)
+        )
 
     def _clear_masks(self):
         self._apply_masks(None, None)
@@ -104,9 +93,8 @@ class VLLMBackend:
             }
 
         # Build fixed masks as a stand-in for compressed mode.
-        head_dim = (
-            self.attn_modules[0].head_size if self.attn_modules else cfg.r_k + cfg.r_v
-        )
+        head_sizes = self.llm.llm_engine.collective_rpc("get_head_size")
+        head_dim = int(head_sizes[0]) if head_sizes else cfg.r_k + cfg.r_v
         mask_k = _build_mask(
             head_dim, cfg.r_k if not cfg.disable_k_compress else head_dim
         )
