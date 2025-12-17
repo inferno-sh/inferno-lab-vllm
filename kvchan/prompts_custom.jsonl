@@ -1,0 +1,5 @@
+{"name": "story", "prompt": "Write a short sci-fi story about a robot discovering emotions."}
+{"name": "math", "prompt": "Compute the first 10 Fibonacci numbers."}
+{"name": "code", "prompt": "Write a Python function to check if a number is prime."}
+{"name": "qa", "prompt": "What are the key differences between supervised and unsupervised learning?"}
+{"name": "recipe", "prompt": "Give a quick recipe for vegetarian tacos in bullet points."}

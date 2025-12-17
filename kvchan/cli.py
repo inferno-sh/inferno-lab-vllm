@@ -4,7 +4,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 
 from .control import CompressionConfig
 from .hf_backend import HFBackend
@@ -31,6 +31,12 @@ def parse_args() -> argparse.Namespace:
     run_p.add_argument("--max_tokens", type=int, default=64)
     run_p.add_argument("--output", type=str, default="kvchan/outputs/run.jsonl")
     run_p.add_argument("--seed", type=int, default=0)
+    run_p.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B-Instruct")
+    run_p.add_argument(
+        "--prompt_file",
+        type=str,
+        help="Optional JSONL file with custom prompts (fields: name, prompt).",
+    )
     run_p.add_argument(
         "--check_every", type=int, default=64, help="Fidelity check interval."
     )
@@ -57,13 +63,45 @@ def parse_args() -> argparse.Namespace:
     probe_p.add_argument("--rK", type=int, default=32)
     probe_p.add_argument("--rV", type=int, default=128)
     probe_p.add_argument("--output", type=str, default="kvchan/outputs/probe.jsonl")
+    probe_p.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B-Instruct")
+    probe_p.add_argument(
+        "--prompt_file",
+        type=str,
+        help="Optional JSONL file with custom prompts (fields: name, prompt).",
+    )
     return parser.parse_args()
 
 
-def build_backend(name: str):
+def build_backend(name: str, model_name: str):
     if name == "hf":
-        return HFBackend()
-    return VLLMBackend()
+        return HFBackend(model_name=model_name)
+    return VLLMBackend(model_name=model_name)
+
+
+def load_prompts(prompt_file: str | None) -> Tuple[list[str], Dict[str, str]]:
+    if not prompt_file:
+        return list(PROMPT_ORDER), PROMPTS
+    path = Path(prompt_file)
+    if not path.is_file():
+        raise FileNotFoundError(f"Prompt file not found: {prompt_file}")
+    prompts: Dict[str, str] = {}
+    order: list[str] = []
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            name = row.get("name")
+            prompt = row.get("prompt")
+            if name is None or prompt is None:
+                raise ValueError(
+                    f"Invalid row in prompt file {prompt_file}: {row}"
+                )
+            prompts[name] = prompt
+            order.append(name)
+    LOG.info("Loaded %d prompts from %s", len(order), prompt_file)
+    return order, prompts
 
 
 def run():
@@ -82,10 +120,11 @@ def run():
             n_stable=args.n_stable,
             retention_threshold=args.retention_threshold,
         )
-        backend = build_backend(args.backend)
+        backend = build_backend(args.backend, args.model)
         results = []
-        for name in PROMPT_ORDER:
-            prompt = PROMPTS[name]
+        prompt_order, prompts = load_prompts(args.prompt_file)
+        for name in prompt_order:
+            prompt = prompts[name]
             LOG.info("Running prompt %s", name)
             res = backend.run_prompt(
                 prompt=prompt,
@@ -110,17 +149,19 @@ def run():
             r_v=args.rV,
             window=0,
         )
-        backend = build_backend(args.backend)
+        backend = build_backend(args.backend, args.model)
+        prompt_order, prompts = load_prompts(args.prompt_file)
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("w") as f:
-            for name in PROMPT_ORDER:
-                prompt = PROMPTS[name]
+            for name in prompt_order:
+                prompt = prompts[name]
                 res = backend.run_prompt(
                     prompt=prompt,
                     mode="full",
                     cfg=cfg,
                     max_new_tokens=0,
+                    seed=args.seed,
                 )
                 res["prompt_name"] = name
                 f.write(json.dumps(res) + "\n")

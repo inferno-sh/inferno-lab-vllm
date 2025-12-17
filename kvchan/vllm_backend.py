@@ -41,6 +41,8 @@ class VLLMBackend:
         self,
         model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
         device: Optional[str] = "cpu",
+        max_model_len: int | None = 4096,
+        gpu_memory_utilization: float = 0.85,
     ):
         # Ensure spawn start method to avoid CUDA fork issues.
         try:
@@ -48,7 +50,12 @@ class VLLMBackend:
         except RuntimeError:
             pass
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        self.llm = LLM(model=model_name)
+        llm_kwargs = {}
+        if max_model_len is not None:
+            llm_kwargs["max_model_len"] = max_model_len
+        llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
+        self.llm = LLM(model=model_name, **llm_kwargs)
+        self.tokenizer = self.llm.get_tokenizer()
 
     def _apply_masks(self, mask_k: torch.Tensor | None, mask_v: torch.Tensor | None):
         """
@@ -81,7 +88,10 @@ class VLLMBackend:
         # First run: full baseline
         self._clear_masks()
         full_outputs = self.llm.generate(prompt, sampling_params)
-        full_text = full_outputs[0].outputs[0].text
+        full_item = full_outputs[0].outputs[0]
+        full_text = full_item.text
+        prompt_tokens = len(self.tokenizer(prompt)["input_ids"])
+        full_gen_tokens = len(getattr(full_item, "token_ids", []))
 
         if mode == "full":
             return {
@@ -90,6 +100,10 @@ class VLLMBackend:
                 "mode": control.state.mode.name,
                 "mask_applied": False,
                 "backoff": False,
+                "prompt_tokens": prompt_tokens,
+                "generated_tokens": full_gen_tokens,
+                "total_tokens": prompt_tokens + full_gen_tokens,
+                "text_chars": len(full_text),
             }
 
         # Build fixed masks as a stand-in for compressed mode.
@@ -106,7 +120,9 @@ class VLLMBackend:
         self._apply_masks(mask_k, mask_v)
         control.state.mode = Mode.COMPRESSED
         masked_outputs = self.llm.generate(prompt, sampling_params)
-        masked_text = masked_outputs[0].outputs[0].text
+        masked_item = masked_outputs[0].outputs[0]
+        masked_text = masked_item.text
+        masked_gen_tokens = len(getattr(masked_item, "token_ids", []))
 
         # Clear masks to avoid leaking to future runs.
         self._clear_masks()
@@ -131,4 +147,14 @@ class VLLMBackend:
             "mask_k_kept": cfg.r_k,
             "mask_v_kept": cfg.r_v,
             "fidelity": fidelity,
+            "prompt_tokens": prompt_tokens,
+            "generated_tokens_full": full_gen_tokens,
+            "generated_tokens_masked": masked_gen_tokens,
+            "generated_tokens": full_gen_tokens if backoff else masked_gen_tokens,
+            "total_tokens": (prompt_tokens + full_gen_tokens)
+            if backoff
+            else (prompt_tokens + masked_gen_tokens),
+            "text_chars": len(full_text if backoff else masked_text),
+            "text_chars_full": len(full_text),
+            "text_chars_masked": len(masked_text),
         }

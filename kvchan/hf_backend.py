@@ -248,4 +248,8 @@ class HFBackend:
             "fidelity_events": fidelity_events,
             "importance": importance.summary(),
             "model_info": model_info,
+            "prompt_tokens": int(input_ids.shape[1]),
+            "generated_tokens": len(output_tokens),
+            "total_tokens": int(input_ids.shape[1]) + len(output_tokens),
+            "text_chars": len(text_out),
         }
