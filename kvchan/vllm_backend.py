@@ -16,14 +16,6 @@ from .stable_mask import StableMaskController, StableMaskStats
 
 LOG = logging.getLogger(__name__)
 
-SMALL_MODEL_ALLOWLIST = {
-    "gpt2",
-    "distilgpt2",
-    "gpt2-medium",
-    "gpt2-large",
-    "gpt2-xl",
-}
-
 
 def _build_indices(head_dim: int, keep: int) -> List[int]:
     keep = min(keep, head_dim)
@@ -115,7 +107,7 @@ class VLLMBackend:
         head_sizes = self.llm.llm_engine.collective_rpc("get_head_size")
         head_dim = int(head_sizes[0]) if head_sizes else cfg.r_k + cfg.r_v
         min_k_keep = int(max(1, head_dim * cfg.min_k_keep_ratio))
-        force_full_k = head_dim <= 64 or self.model_name in SMALL_MODEL_ALLOWLIST
+        force_full_k = head_dim <= 64
 
         # First run: full baseline
         self._clear_masks()
