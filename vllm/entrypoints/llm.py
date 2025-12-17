@@ -1581,8 +1581,10 @@ class LLM:
 
         for sp in params if isinstance(params, Sequence) else (params,):
             if isinstance(sp, SamplingParams):
-                # We only care about the final output
-                sp.output_kind = RequestOutputKind.FINAL_ONLY
+                # Respect caller-provided output_kind; default (CUMULATIVE)
+                # can be used by advanced users to receive streaming outputs.
+                if sp.output_kind is None:
+                    sp.output_kind = RequestOutputKind.FINAL_ONLY
 
         # Add requests to the engine.
         it = prompts

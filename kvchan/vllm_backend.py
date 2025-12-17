@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from vllm import LLM, SamplingParams
+from vllm.sampling_params import RequestOutputKind
 from transformers import AutoConfig
 
 from .control import CompressionConfig, ControlLoop, Mode
@@ -135,36 +136,58 @@ class VLLMBackend:
             head_dim, cfg.disable_k_compress, cfg.disable_v_compress
         )
 
-        # Apply initial stable masks and generate.
+        # Apply initial stable masks and drive the engine manually for mid-gen updates.
         self._apply_masks(mask_k, mask_v)
         control.state.mode = Mode.COMPRESSED
-        masked_outputs = self.llm.generate(prompt, sampling_params)
-        masked_item = masked_outputs[0].outputs[0]
-        masked_text = masked_item.text
-        masked_gen_tokens = len(getattr(masked_item, "token_ids", []))
+        sampling_params.output_kind = RequestOutputKind.CUMULATIVE
+        self.llm._validate_and_add_requests(
+            prompts=[prompt],
+            params=[sampling_params],
+            use_tqdm=False,
+            lora_request=None,
+            priority=None,
+            tokenization_kwargs=None,
+        )
 
-        # Simulate periodic updates for statistics (masks remain stable during
-        # the single-shot generate call).
-        if stable_ctrl.enable and cfg.stable_mask_update_interval > 0:
-            tokens_checkpoint = cfg.stable_mask_update_interval
-            while tokens_checkpoint <= masked_gen_tokens:
-                cand_idx_k = _build_indices(
-                    head_dim, cfg.r_k if not cfg.disable_k_compress else head_dim
-                )
-                cand_idx_v = _build_indices(
-                    head_dim, cfg.r_v if not cfg.disable_v_compress else head_dim
-                )
-                changed, ov_k, ov_v = stable_ctrl.maybe_update(
-                    tokens_checkpoint, cand_idx_k, cand_idx_v
-                )
-                LOG.debug(
-                    "Stable mask update at %d tokens: changed=%s, overlap_k=%.3f, overlap_v=%.3f",
-                    tokens_checkpoint,
-                    changed,
-                    ov_k,
-                    ov_v,
-                )
-                tokens_checkpoint += cfg.stable_mask_update_interval
+        masked_text = ""
+        masked_gen_tokens = 0
+        prompt_token_count = prompt_tokens
+        while self.llm.llm_engine.has_unfinished_requests():
+            step_outputs = self.llm.llm_engine.step()
+            for out in step_outputs:
+                if not out.outputs:
+                    continue
+                masked_item = out.outputs[0]
+                masked_text = masked_item.text
+                masked_gen_tokens = len(getattr(masked_item, "token_ids", []))
+                if masked_item.finished():
+                    prompt_token_count = (
+                        len(out.prompt_token_ids)
+                        if out.prompt_token_ids
+                        else prompt_tokens
+                    )
+                if stable_ctrl.should_update(masked_gen_tokens):
+                    cand_idx_k = _build_indices(
+                        head_dim, cfg.r_k if not cfg.disable_k_compress else head_dim
+                    )
+                    cand_idx_v = _build_indices(
+                        head_dim, cfg.r_v if not cfg.disable_v_compress else head_dim
+                    )
+                    changed, ov_k, ov_v = stable_ctrl.maybe_update(
+                        masked_gen_tokens, cand_idx_k, cand_idx_v
+                    )
+                    LOG.debug(
+                        "Stable mask update at %d tokens: changed=%s, overlap_k=%.3f, overlap_v=%.3f",
+                        masked_gen_tokens,
+                        changed,
+                        ov_k,
+                        ov_v,
+                    )
+                    if changed:
+                        mask_k, mask_v = stable_ctrl.masks(
+                            head_dim, cfg.disable_k_compress, cfg.disable_v_compress
+                        )
+                        self._apply_masks(mask_k, mask_v)
 
         # Clear masks to avoid leaking to future runs.
         self._clear_masks()
