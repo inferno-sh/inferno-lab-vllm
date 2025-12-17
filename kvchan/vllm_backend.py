@@ -16,6 +16,14 @@ from .stable_mask import StableMaskController, StableMaskStats
 
 LOG = logging.getLogger(__name__)
 
+SMALL_MODEL_ALLOWLIST = {
+    "gpt2",
+    "distilgpt2",
+    "gpt2-medium",
+    "gpt2-large",
+    "gpt2-xl",
+}
+
 
 def _build_indices(head_dim: int, keep: int) -> List[int]:
     keep = min(keep, head_dim)
@@ -68,6 +76,7 @@ class VLLMBackend:
         llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
         self.llm = LLM(model=model_name, **llm_kwargs)
         self.tokenizer = self.llm.get_tokenizer()
+        self.model_name = model_name
 
     def _apply_masks(self, mask_k: torch.Tensor | None, mask_v: torch.Tensor | None):
         """
@@ -106,6 +115,7 @@ class VLLMBackend:
         head_sizes = self.llm.llm_engine.collective_rpc("get_head_size")
         head_dim = int(head_sizes[0]) if head_sizes else cfg.r_k + cfg.r_v
         min_k_keep = int(max(1, head_dim * cfg.min_k_keep_ratio))
+        force_full_k = head_dim <= 64 or self.model_name in SMALL_MODEL_ALLOWLIST
 
         # First run: full baseline
         self._clear_masks()
@@ -136,12 +146,12 @@ class VLLMBackend:
                 "head_dim": head_dim,
                 "mask_k_effective": len(
                     _build_indices(
-                        head_dim, cfg.r_k if not cfg.disable_k_compress else head_dim
+                        head_dim, head_dim if cfg.disable_k_compress else k_keep
                     )
                 ),
                 "mask_v_effective": len(
                     _build_indices(
-                        head_dim, cfg.r_v if not cfg.disable_v_compress else head_dim
+                        head_dim, head_dim if cfg.disable_v_compress else v_keep
                     )
                 ),
                 "first_mismatch_token_idx": None,
@@ -149,13 +159,17 @@ class VLLMBackend:
             }
 
         # Build fixed masks as a stand-in for compressed mode.
-        cand_idx_k = _build_indices(
-            head_dim,
-            min_k_keep if not cfg.disable_k_compress else head_dim,
-        )
-        cand_idx_v = _build_indices(
-            head_dim, cfg.r_v if not cfg.disable_v_compress else head_dim
-        )
+        k_keep = head_dim if cfg.disable_k_compress else cfg.r_k
+        k_keep = min(k_keep, head_dim)
+        if not cfg.disable_k_compress:
+            k_keep = max(k_keep, min_k_keep)
+        if force_full_k:
+            k_keep = head_dim
+        v_keep = head_dim if cfg.disable_v_compress else cfg.r_v
+        v_keep = min(v_keep, head_dim)
+
+        cand_idx_k = _build_indices(head_dim, k_keep)
+        cand_idx_v = _build_indices(head_dim, v_keep)
         stable_ctrl.initialize(cand_idx_k, cand_idx_v)
         mask_k, mask_v = stable_ctrl.masks(
             head_dim, cfg.disable_k_compress, cfg.disable_v_compress
@@ -242,8 +256,8 @@ class VLLMBackend:
             "mode": control.state.mode.name,
             "mask_applied": True,
             "backoff": backoff,
-            "mask_k_kept": cfg.r_k,
-            "mask_v_kept": cfg.r_v,
+            "mask_k_kept": k_keep,
+            "mask_v_kept": v_keep,
             "fidelity": fidelity,
             "head_dim": head_dim,
             "mask_k_effective": len(cand_idx_k),
