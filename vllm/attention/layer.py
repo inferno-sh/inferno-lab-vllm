@@ -186,6 +186,11 @@ class Attention(nn.Module, AttentionLayerBase):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
+        # Optional channel masks applied to K/V for experimentation. These do
+        # not change cache allocation sizes and are intended for correctness-
+        # first masking/backoff flows.
+        self.channel_mask_k: torch.Tensor | None = None
+        self.channel_mask_v: torch.Tensor | None = None
 
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
@@ -340,6 +345,15 @@ class Attention(nn.Module, AttentionLayerBase):
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                # Apply optional channel masks before calling backend.
+                if key is not None and self.channel_mask_k is not None:
+                    key = key * self.channel_mask_k.to(
+                        device=key.device, dtype=key.dtype
+                    )
+                if value is not None and self.channel_mask_v is not None:
+                    value = value * self.channel_mask_v.to(
+                        device=value.device, dtype=value.dtype
+                    )
                 self.impl.forward(
                     self, query, key, value, self_kv_cache, attn_metadata, output=output
                 )
@@ -355,6 +369,14 @@ class Attention(nn.Module, AttentionLayerBase):
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                if key is not None and self.channel_mask_k is not None:
+                    key = key * self.channel_mask_k.to(
+                        device=key.device, dtype=key.dtype
+                    )
+                if value is not None and self.channel_mask_v is not None:
+                    value = value * self.channel_mask_v.to(
+                        device=value.device, dtype=value.dtype
+                    )
                 return self.impl.forward(
                     self, query, key, value, self_kv_cache, attn_metadata
                 )
@@ -380,6 +402,24 @@ class Attention(nn.Module, AttentionLayerBase):
         s += f", scale={self.impl.scale}"  # type: ignore
         s += f", backend={self.impl.__class__.__name__}"
         return s
+
+    def set_channel_masks(
+        self, mask_k: torch.Tensor | None, mask_v: torch.Tensor | None
+    ) -> None:
+        """
+        Set per-head channel masks to be applied to key/value before attention.
+        mask_* expected shape: [num_kv_heads, head_size] or broadcastable.
+        """
+        self.channel_mask_k = (
+            mask_k.view(1, self.num_kv_heads, self.head_size)
+            if mask_k is not None
+            else None
+        )
+        self.channel_mask_v = (
+            mask_v.view(1, self.num_kv_heads, self.head_size)
+            if mask_v is not None
+            else None
+        )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         self.impl.process_weights_after_loading(act_dtype)
