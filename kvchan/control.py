@@ -23,6 +23,9 @@ class CompressionConfig:
     retention_threshold: float = 0.9
     n_stable: int = 20
     bucket_per_layer: bool = True
+    stable_mask_enable: bool = True
+    stable_mask_update_interval: int = 64
+    stable_mask_overlap_threshold: float = 0.85
 
 
 @dataclasses.dataclass

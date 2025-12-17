@@ -252,4 +252,11 @@ class HFBackend:
             "generated_tokens": len(output_tokens),
             "total_tokens": int(input_ids.shape[1]) + len(output_tokens),
             "text_chars": len(text_out),
+            "stable_mask_enable": cfg.stable_mask_enable,
+            "stable_mask_update_interval": cfg.stable_mask_update_interval,
+            "stable_mask_overlap_threshold": cfg.stable_mask_overlap_threshold,
+            "stable_mask_updates_attempted": 0,
+            "stable_mask_updates_accepted": 0,
+            "stable_mask_updates_rejected": 0,
+            "stable_mask_avg_overlap": 0.0,
         }

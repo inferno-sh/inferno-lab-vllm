@@ -55,6 +55,24 @@ def parse_args() -> argparse.Namespace:
         default=0.9,
         help="Retention threshold for stability.",
     )
+    run_p.add_argument(
+        "--stable_mask_enable",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable stable per-head masks with hysteresis.",
+    )
+    run_p.add_argument(
+        "--stable_mask_update_interval",
+        type=int,
+        default=64,
+        help="Update cadence (tokens) for stable mask hysteresis.",
+    )
+    run_p.add_argument(
+        "--stable_mask_overlap_threshold",
+        type=float,
+        default=0.85,
+        help="Jaccard overlap threshold for accepting new masks.",
+    )
 
     probe_p = sub.add_parser(
         "train-probe", help="Collect importance stats without compression."
@@ -95,9 +113,7 @@ def load_prompts(prompt_file: str | None) -> Tuple[list[str], Dict[str, str]]:
             name = row.get("name")
             prompt = row.get("prompt")
             if name is None or prompt is None:
-                raise ValueError(
-                    f"Invalid row in prompt file {prompt_file}: {row}"
-                )
+                raise ValueError(f"Invalid row in prompt file {prompt_file}: {row}")
             prompts[name] = prompt
             order.append(name)
     LOG.info("Loaded %d prompts from %s", len(order), prompt_file)
@@ -119,6 +135,9 @@ def run():
             update_interval=args.update_interval,
             n_stable=args.n_stable,
             retention_threshold=args.retention_threshold,
+            stable_mask_enable=args.stable_mask_enable,
+            stable_mask_update_interval=args.stable_mask_update_interval,
+            stable_mask_overlap_threshold=args.stable_mask_overlap_threshold,
         )
         backend = build_backend(args.backend, args.model)
         results = []
