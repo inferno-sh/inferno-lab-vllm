@@ -26,6 +26,7 @@ class CompressionConfig:
     stable_mask_enable: bool = True
     stable_mask_update_interval: int = 64
     stable_mask_overlap_threshold: float = 0.85
+    min_k_keep_ratio: float = 0.75
 
 
 @dataclasses.dataclass

@@ -56,6 +56,12 @@ def parse_args() -> argparse.Namespace:
         help="Retention threshold for stability.",
     )
     run_p.add_argument(
+        "--min_k_keep_ratio",
+        type=float,
+        default=0.75,
+        help="Minimum ratio of head_dim to keep for keys (guardrail).",
+    )
+    run_p.add_argument(
         "--stable_mask_enable",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -138,6 +144,7 @@ def run():
             stable_mask_enable=args.stable_mask_enable,
             stable_mask_update_interval=args.stable_mask_update_interval,
             stable_mask_overlap_threshold=args.stable_mask_overlap_threshold,
+            min_k_keep_ratio=args.min_k_keep_ratio,
         )
         backend = build_backend(args.backend, args.model)
         results = []

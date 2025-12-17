@@ -22,6 +22,16 @@ def _build_indices(head_dim: int, keep: int) -> List[int]:
     return list(range(keep))
 
 
+def _first_mismatch(a: List[int], b: List[int]) -> Optional[int]:
+    limit = min(len(a), len(b))
+    for i in range(limit):
+        if a[i] != b[i]:
+            return i
+    if len(a) != len(b):
+        return limit
+    return None
+
+
 class VLLMBackend:
     """
     vLLM backend with channel masking support. This keeps the existing KV
@@ -93,6 +103,9 @@ class VLLMBackend:
             overlap_threshold=overlap_threshold,
             enable=stable_cfg_enable,
         )
+        head_sizes = self.llm.llm_engine.collective_rpc("get_head_size")
+        head_dim = int(head_sizes[0]) if head_sizes else cfg.r_k + cfg.r_v
+        min_k_keep = int(max(1, head_dim * cfg.min_k_keep_ratio))
 
         # First run: full baseline
         self._clear_masks()
@@ -120,13 +133,25 @@ class VLLMBackend:
                 "stable_mask_updates_accepted": 0,
                 "stable_mask_updates_rejected": 0,
                 "stable_mask_avg_overlap": 0.0,
+                "head_dim": head_dim,
+                "mask_k_effective": len(
+                    _build_indices(
+                        head_dim, cfg.r_k if not cfg.disable_k_compress else head_dim
+                    )
+                ),
+                "mask_v_effective": len(
+                    _build_indices(
+                        head_dim, cfg.r_v if not cfg.disable_v_compress else head_dim
+                    )
+                ),
+                "first_mismatch_token_idx": None,
+                "backoff_token_idx": None,
             }
 
         # Build fixed masks as a stand-in for compressed mode.
-        head_sizes = self.llm.llm_engine.collective_rpc("get_head_size")
-        head_dim = int(head_sizes[0]) if head_sizes else cfg.r_k + cfg.r_v
         cand_idx_k = _build_indices(
-            head_dim, cfg.r_k if not cfg.disable_k_compress else head_dim
+            head_dim,
+            min_k_keep if not cfg.disable_k_compress else head_dim,
         )
         cand_idx_v = _build_indices(
             head_dim, cfg.r_v if not cfg.disable_v_compress else head_dim
@@ -198,6 +223,13 @@ class VLLMBackend:
             "len_masked": len(masked_text),
         }
         backoff = not fidelity["match"]
+        first_mismatch = None
+        backoff_token_idx = None
+        if backoff:
+            full_tokens = getattr(full_item, "token_ids", []) or []
+            masked_tokens = getattr(masked_item, "token_ids", []) or []
+            first_mismatch = _first_mismatch(full_tokens, masked_tokens)
+            backoff_token_idx = first_mismatch
         if backoff:
             control.reset_to_full()
 
@@ -213,6 +245,9 @@ class VLLMBackend:
             "mask_k_kept": cfg.r_k,
             "mask_v_kept": cfg.r_v,
             "fidelity": fidelity,
+            "head_dim": head_dim,
+            "mask_k_effective": len(cand_idx_k),
+            "mask_v_effective": len(cand_idx_v),
             "prompt_tokens": prompt_tokens,
             "generated_tokens_full": full_gen_tokens,
             "generated_tokens_masked": masked_gen_tokens,
@@ -230,4 +265,6 @@ class VLLMBackend:
             "stable_mask_updates_accepted": stats.accepted,
             "stable_mask_updates_rejected": stats.rejected,
             "stable_mask_avg_overlap": stats.avg_overlap,
+            "first_mismatch_token_idx": first_mismatch,
+            "backoff_token_idx": backoff_token_idx,
         }
