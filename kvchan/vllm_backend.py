@@ -79,10 +79,8 @@ class VLLMBackend:
         # Disable prefix caching to avoid cross-request nondeterminism during
         # step-driven runs and mask debugging.
         llm_kwargs["enable_prefix_caching"] = False
-        # Disable torch.compile to allow runtime mask application.
-        # The unified_attention custom op is compiled away otherwise,
-        # preventing dynamic mask updates during inference.
-        llm_kwargs["enforce_eager"] = True
+        # Channel masks use pre-allocated buffers with in-place updates,
+        # making them compatible with CUDA graphs (vLLM default mode).
         self.llm = LLM(model=model_name, **llm_kwargs)
         self.tokenizer = self.llm.get_tokenizer()
         self.model_name = model_name

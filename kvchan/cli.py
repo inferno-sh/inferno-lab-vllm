@@ -111,7 +111,6 @@ def parse_args() -> argparse.Namespace:
         default=64,
         help="Tokens to wait before enabling compression (warmup period).",
     )
-
     probe_p = sub.add_parser(
         "train-probe", help="Collect importance stats without compression."
     )

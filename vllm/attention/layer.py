@@ -187,11 +187,14 @@ class Attention(nn.Module, AttentionLayerBase):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
-        # Optional channel masks applied to K/V for experimentation. These do
-        # not change cache allocation sizes and are intended for correctness-
-        # first masking/backoff flows.
-        self.channel_mask_k: torch.Tensor | None = None
-        self.channel_mask_v: torch.Tensor | None = None
+        # Pre-allocated channel mask buffers for K/V. Using fixed buffers allows
+        # CUDA graph capture to record the buffer addresses while contents can
+        # be updated dynamically between graph replays via copy_().
+        # Shape: [1, num_kv_heads, head_size], initialized to ones (no masking).
+        # Set to None initially; will be allocated on first use to get correct device.
+        self._channel_mask_k_buffer: torch.Tensor | None = None
+        self._channel_mask_v_buffer: torch.Tensor | None = None
+        self._channel_masks_enabled = False
 
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
@@ -404,29 +407,88 @@ class Attention(nn.Module, AttentionLayerBase):
         s += f", backend={self.impl.__class__.__name__}"
         return s
 
+    def _ensure_mask_buffers(self, device: torch.device) -> None:
+        """Lazily allocate mask buffers on the correct device."""
+        if self._channel_mask_k_buffer is None:
+            self._channel_mask_k_buffer = torch.ones(
+                1, self.num_kv_heads, self.head_size, dtype=torch.float32, device=device
+            )
+        if self._channel_mask_v_buffer is None:
+            self._channel_mask_v_buffer = torch.ones(
+                1, self.num_kv_heads, self.head_size, dtype=torch.float32, device=device
+            )
+
     def set_channel_masks(
         self, mask_k: torch.Tensor | None, mask_v: torch.Tensor | None
     ) -> None:
         """
         Set per-head channel masks to be applied to key/value before attention.
-        mask_* expected shape: [num_kv_heads, head_size] or broadcastable.
+        mask_* expected shape: [head_size] or [num_kv_heads, head_size].
+
+        Uses pre-allocated buffers with in-place updates for CUDA graph
+        compatibility. The buffer addresses remain fixed (captured by CUDA
+        graphs) while contents are updated dynamically.
         """
+        # Determine device from input masks or use cuda:0 as default
+        device = torch.device("cuda:0")
+        if mask_k is not None:
+            device = mask_k.device
+        elif mask_v is not None:
+            device = mask_v.device
+
+        # Ensure buffers are allocated
+        self._ensure_mask_buffers(device)
+
+        # Update K mask buffer in-place
         if mask_k is not None:
             if mask_k.numel() == self.head_size:
-                mask_k = mask_k.view(1, 1, self.head_size).expand(
+                # Broadcast [head_size] -> [1, num_kv_heads, head_size]
+                expanded = mask_k.view(1, 1, self.head_size).expand(
                     1, self.num_kv_heads, self.head_size
                 )
+                self._channel_mask_k_buffer.copy_(expanded)
             else:
-                mask_k = mask_k.view(1, self.num_kv_heads, self.head_size)
+                self._channel_mask_k_buffer.copy_(
+                    mask_k.view(1, self.num_kv_heads, self.head_size)
+                )
+            self._channel_masks_enabled = True
+        else:
+            # Reset to ones (no masking)
+            self._channel_mask_k_buffer.fill_(1.0)
+
+        # Update V mask buffer in-place
         if mask_v is not None:
             if mask_v.numel() == self.head_size:
-                mask_v = mask_v.view(1, 1, self.head_size).expand(
+                expanded = mask_v.view(1, 1, self.head_size).expand(
                     1, self.num_kv_heads, self.head_size
                 )
+                self._channel_mask_v_buffer.copy_(expanded)
             else:
-                mask_v = mask_v.view(1, self.num_kv_heads, self.head_size)
-        self.channel_mask_k = mask_k
-        self.channel_mask_v = mask_v
+                self._channel_mask_v_buffer.copy_(
+                    mask_v.view(1, self.num_kv_heads, self.head_size)
+                )
+            self._channel_masks_enabled = True
+        else:
+            # Reset to ones (no masking)
+            self._channel_mask_v_buffer.fill_(1.0)
+
+        # If both masks are None, disable masking entirely
+        if mask_k is None and mask_v is None:
+            self._channel_masks_enabled = False
+
+    @property
+    def channel_mask_k(self) -> torch.Tensor | None:
+        """Return K mask buffer if masking is enabled, else None."""
+        if self._channel_masks_enabled and self._channel_mask_k_buffer is not None:
+            return self._channel_mask_k_buffer
+        return None
+
+    @property
+    def channel_mask_v(self) -> torch.Tensor | None:
+        """Return V mask buffer if masking is enabled, else None."""
+        if self._channel_masks_enabled and self._channel_mask_v_buffer is not None:
+            return self._channel_mask_v_buffer
+        return None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         self.impl.process_weights_after_loading(act_dtype)
