@@ -66,6 +66,9 @@ class VLLMBackend:
                 LOG.debug("Failed to read config for %s: %s", model_name, exc)
             llm_kwargs["max_model_len"] = safe_len
         llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
+        # Disable prefix caching to avoid cross-request nondeterminism during
+        # step-driven runs and mask debugging.
+        llm_kwargs["enable_prefix_caching"] = False
         self.llm = LLM(model=model_name, **llm_kwargs)
         self.tokenizer = self.llm.get_tokenizer()
         self.model_name = model_name
@@ -92,7 +95,10 @@ class VLLMBackend:
         max_new_tokens: int = 64,
         seed: int = 0,
     ) -> Dict:
-        sampling_params = SamplingParams(
+        baseline_params = SamplingParams(
+            temperature=0.0, max_tokens=max_new_tokens, seed=seed
+        )
+        masked_params = SamplingParams(
             temperature=0.0, max_tokens=max_new_tokens, seed=seed
         )
         control = ControlLoop(cfg, num_layers=0)
@@ -108,14 +114,54 @@ class VLLMBackend:
         head_dim = int(head_sizes[0]) if head_sizes else cfg.r_k + cfg.r_v
         min_k_keep = int(max(1, head_dim * cfg.min_k_keep_ratio))
         force_full_k = head_dim <= 64
+        k_keep = head_dim if cfg.disable_k_compress else cfg.r_k
+        k_keep = min(k_keep, head_dim)
+        if not cfg.disable_k_compress:
+            k_keep = max(k_keep, min_k_keep)
+        if force_full_k:
+            k_keep = head_dim
+        v_keep = head_dim if cfg.disable_v_compress else cfg.r_v
+        v_keep = min(v_keep, head_dim)
 
         # First run: full baseline
-        self._clear_masks()
-        full_outputs = self.llm.generate(prompt, sampling_params)
-        full_item = full_outputs[0].outputs[0]
-        full_text = full_item.text
         prompt_tokens = len(self.tokenizer(prompt)["input_ids"])
-        full_gen_tokens = len(getattr(full_item, "token_ids", []))
+
+        def run_step_no_masks(sp: SamplingParams) -> Tuple[str, int, List[int]]:
+            sp.output_kind = RequestOutputKind.FINAL_ONLY
+            self.llm._validate_and_add_requests(
+                prompts=[prompt],
+                params=[sp],
+                use_tqdm=False,
+                lora_request=None,
+                priority=None,
+                tokenization_kwargs=None,
+            )
+            text_out = ""
+            gen_tokens = 0
+            token_ids: List[int] = []
+            while self.llm.llm_engine.has_unfinished_requests():
+                step_outputs = self.llm.llm_engine.step()
+                for out in step_outputs:
+                    if not out.outputs:
+                        continue
+                    item = out.outputs[0]
+                    text_out = item.text
+                    gen_tokens = len(getattr(item, "token_ids", []))
+                    token_ids = getattr(item, "token_ids", []) or token_ids
+            return text_out, gen_tokens, token_ids
+
+        self._clear_masks()
+        baseline_token_ids: List[int] = []
+        if cfg.debug_step_baseline:
+            full_text, full_gen_tokens, baseline_token_ids = run_step_no_masks(
+                baseline_params
+            )
+        else:
+            full_outputs = self.llm.generate(prompt, baseline_params)
+            full_item = full_outputs[0].outputs[0]
+            full_text = full_item.text
+            baseline_token_ids = getattr(full_item, "token_ids", []) or []
+            full_gen_tokens = len(baseline_token_ids)
 
         if mode == "full":
             return {
@@ -150,30 +196,38 @@ class VLLMBackend:
                 "backoff_token_idx": None,
             }
 
-        # Build fixed masks as a stand-in for compressed mode.
-        k_keep = head_dim if cfg.disable_k_compress else cfg.r_k
-        k_keep = min(k_keep, head_dim)
-        if not cfg.disable_k_compress:
-            k_keep = max(k_keep, min_k_keep)
-        if force_full_k:
-            k_keep = head_dim
-        v_keep = head_dim if cfg.disable_v_compress else cfg.r_v
-        v_keep = min(v_keep, head_dim)
-
         cand_idx_k = _build_indices(head_dim, k_keep)
         cand_idx_v = _build_indices(head_dim, v_keep)
         stable_ctrl.initialize(cand_idx_k, cand_idx_v)
+        # Build masks. For small heads, use all-ones to exercise the plumbing
+        # without changing outputs.
         mask_k, mask_v = stable_ctrl.masks(
             head_dim, cfg.disable_k_compress, cfg.disable_v_compress
         )
+        if force_full_k and v_keep == head_dim:
+            mask_k = torch.ones_like(mask_k) if mask_k is not None else None
+            mask_v = torch.ones_like(mask_v) if mask_v is not None else None
+        if cfg.debug_force_all_ones_mask:
+            mask_k = torch.ones_like(mask_k) if mask_k is not None else None
+            mask_v = torch.ones_like(mask_v) if mask_v is not None else None
+        apply_masks = (mask_k is not None or mask_v is not None) and (
+            not cfg.debug_skip_masks
+        )
 
         # Apply initial stable masks and drive the engine manually for mid-gen updates.
-        self._apply_masks(mask_k, mask_v)
+        if apply_masks:
+            self._apply_masks(mask_k, mask_v)
+        else:
+            self._clear_masks()
         control.state.mode = Mode.COMPRESSED
-        sampling_params.output_kind = RequestOutputKind.CUMULATIVE
+        masked_params.output_kind = (
+            RequestOutputKind.FINAL_ONLY
+            if cfg.debug_skip_masks
+            else RequestOutputKind.CUMULATIVE
+        )
         self.llm._validate_and_add_requests(
             prompts=[prompt],
-            params=[sampling_params],
+            params=[masked_params],
             use_tqdm=False,
             lora_request=None,
             priority=None,
@@ -183,6 +237,7 @@ class VLLMBackend:
         masked_text = ""
         masked_gen_tokens = 0
         prompt_token_count = prompt_tokens
+        masked_token_ids: List[int] = []
         while self.llm.llm_engine.has_unfinished_requests():
             step_outputs = self.llm.llm_engine.step()
             for out in step_outputs:
@@ -191,6 +246,9 @@ class VLLMBackend:
                 masked_item = out.outputs[0]
                 masked_text = masked_item.text
                 masked_gen_tokens = len(getattr(masked_item, "token_ids", []))
+                masked_token_ids = (
+                    getattr(masked_item, "token_ids", []) or masked_token_ids
+                )
                 if masked_item.finished():
                     prompt_token_count = (
                         len(out.prompt_token_ids)
@@ -198,12 +256,8 @@ class VLLMBackend:
                         else prompt_tokens
                     )
                 if stable_ctrl.should_update(masked_gen_tokens):
-                    cand_idx_k = _build_indices(
-                        head_dim, cfg.r_k if not cfg.disable_k_compress else head_dim
-                    )
-                    cand_idx_v = _build_indices(
-                        head_dim, cfg.r_v if not cfg.disable_v_compress else head_dim
-                    )
+                    cand_idx_k = _build_indices(head_dim, k_keep)
+                    cand_idx_v = _build_indices(head_dim, v_keep)
                     changed, ov_k, ov_v = stable_ctrl.maybe_update(
                         masked_gen_tokens, cand_idx_k, cand_idx_v
                     )
@@ -214,7 +268,7 @@ class VLLMBackend:
                         ov_k,
                         ov_v,
                     )
-                    if changed:
+                    if changed and apply_masks:
                         mask_k, mask_v = stable_ctrl.masks(
                             head_dim, cfg.disable_k_compress, cfg.disable_v_compress
                         )
@@ -232,9 +286,7 @@ class VLLMBackend:
         first_mismatch = None
         backoff_token_idx = None
         if backoff:
-            full_tokens = getattr(full_item, "token_ids", []) or []
-            masked_tokens = getattr(masked_item, "token_ids", []) or []
-            first_mismatch = _first_mismatch(full_tokens, masked_tokens)
+            first_mismatch = _first_mismatch(baseline_token_ids, masked_token_ids)
             backoff_token_idx = first_mismatch
         if backoff:
             control.reset_to_full()
@@ -246,7 +298,7 @@ class VLLMBackend:
             "baseline_text": full_text,
             "masked_text": masked_text,
             "mode": control.state.mode.name,
-            "mask_applied": True,
+            "mask_applied": apply_masks,
             "backoff": backoff,
             "mask_k_kept": k_keep,
             "mask_v_kept": v_keep,

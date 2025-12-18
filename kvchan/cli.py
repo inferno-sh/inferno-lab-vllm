@@ -62,6 +62,21 @@ def parse_args() -> argparse.Namespace:
         help="Minimum ratio of head_dim to keep for keys (guardrail).",
     )
     run_p.add_argument(
+        "--debug_force_all_ones_mask",
+        action="store_true",
+        help="Force masks to all-ones for debugging masking correctness.",
+    )
+    run_p.add_argument(
+        "--debug_skip_masks",
+        action="store_true",
+        help="Skip applying masks but still use step loop (debug correctness).",
+    )
+    run_p.add_argument(
+        "--debug_step_baseline",
+        action="store_true",
+        help="Run FULL baseline via step loop (no masks) for apples-to-apples comparison.",
+    )
+    run_p.add_argument(
         "--stable_mask_enable",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -145,6 +160,9 @@ def run():
             stable_mask_update_interval=args.stable_mask_update_interval,
             stable_mask_overlap_threshold=args.stable_mask_overlap_threshold,
             min_k_keep_ratio=args.min_k_keep_ratio,
+            debug_force_all_ones_mask=args.debug_force_all_ones_mask,
+            debug_skip_masks=args.debug_skip_masks,
+            debug_step_baseline=args.debug_step_baseline,
         )
         backend = build_backend(args.backend, args.model)
         results = []
