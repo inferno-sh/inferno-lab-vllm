@@ -30,6 +30,10 @@ class CompressionConfig:
     debug_force_all_ones_mask: bool = False
     debug_skip_masks: bool = False
     debug_step_baseline: bool = False
+    # Importance-based channel selection (like HF backend)
+    use_importance: bool = False
+    importance_beta: float = 0.98
+    importance_warmup_tokens: int = 64
 
 
 @dataclasses.dataclass

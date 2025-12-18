@@ -20,8 +20,14 @@ This prototype implements a channel-selection KV cache with a full-fidelity slid
 # Baseline full mode (HF eager)
 python -m kvchan.cli run --backend hf --mode full --max_tokens 64
 
-# Dynamic compression with window W
+# Dynamic compression with window W (HF)
 python -m kvchan.cli run --backend hf --mode dynamic --W 128 --rK 32 --rV 128 --check_every 16
+
+# Baseline full mode (vLLM)
+python -m kvchan.cli run --backend vllm --mode full --max_tokens 64
+
+# Dynamic compression with masking (vLLM)
+python -m kvchan.cli run --backend vllm --mode dynamic --rK 32 --rV 128
 
 # Probe-only importance collection
 python -m kvchan.cli train-probe --backend hf
@@ -30,7 +36,7 @@ Results are written as JSONL under `kvchan/outputs/`.
 
 ## Backends
 - **HF backend (`hf_backend.py`)**: correctness-first, stepwise decoding with custom KV stores and stability gating. Uses a scatter slow path when compressed to keep behavior correct. This path is the reference for debugging.
-- **vLLM backend (`vllm_backend.py`)**: shares the interface and falls back to the HF path today. The intended hook points inside vLLM are the KV cache allocator and attention backends; implement `PackedKVCache` as a KVStore and scatter packed K/V into temporary full tensors for attention reads. The packed buffers should be allocated with last-dim = `rK`/`rV` to reduce persistent KV allocation.
+- **vLLM backend (`vllm_backend.py`)**: independent implementation using vLLM's native engine with channel masking support. Uses attention-layer masks to zero out unselected dimensions and compares baseline vs masked outputs for fidelity. The intended hook points inside vLLM are the KV cache allocator and attention backends; implement `PackedKVCache` as a KVStore and scatter packed K/V into temporary full tensors for attention reads. The packed buffers should be allocated with last-dim = `rK`/`rV` to reduce persistent KV allocation.
 
 ## How VRAM is saved
 Packed storage reduces the physical last dimension of the KV buffers (rK/rV instead of d_head) for all tokens outside the uncompressed window. The sliding window guarantees fidelity for recent context, while older tokens consume less memory. `memory_bytes()` in both caches reports the total allocated bytes so runs can log savings.

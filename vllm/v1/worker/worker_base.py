@@ -15,6 +15,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
+from vllm.attention.channel_importance import ChannelImportanceManager
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.serial_utils import run_method
 
@@ -140,6 +141,100 @@ class WorkerBase:
         for mod in model.modules():
             if hasattr(mod, "set_channel_masks"):
                 mod.set_channel_masks(mask_k_tensor, mask_v_tensor)  # type: ignore[attr-defined]
+
+    def configure_channel_importance(
+        self,
+        r_k: int,
+        r_v: int,
+        beta: float = 0.98,
+        update_interval: int = 32,
+        warmup_tokens: int = 64,
+    ) -> None:
+        """
+        Configure channel importance tracking for dynamic mask selection.
+
+        Args:
+            r_k: Number of K channels to keep
+            r_v: Number of V channels to keep
+            beta: EMA decay factor
+            update_interval: Tokens between mask recomputation
+            warmup_tokens: Tokens before enabling compression
+        """
+        # Collect model info
+        model = self.get_model()
+        num_layers = 0
+        num_heads = 0
+        head_dim = 0
+        layer_names: list[str] = []
+
+        for name, mod in model.named_modules():
+            if hasattr(mod, "head_size") and hasattr(mod, "num_kv_heads"):
+                num_layers += 1
+                head_dim = int(getattr(mod, "head_size"))
+                num_heads = int(getattr(mod, "num_kv_heads"))
+                layer_names.append(name)
+
+        if num_layers == 0:
+            logger.warning("No attention layers found for importance tracking")
+            return
+
+        # Configure the importance manager
+        importance_mgr = ChannelImportanceManager.get()
+        importance_mgr.configure(
+            num_layers=num_layers,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            device=self.device,
+            r_k=r_k,
+            r_v=r_v,
+            beta=beta,
+            update_interval=update_interval,
+            warmup_tokens=warmup_tokens,
+        )
+
+        # Register layer name to index mappings
+        for idx, layer_name in enumerate(layer_names):
+            importance_mgr.register_layer(layer_name, idx)
+
+        # Set up callback to update masks when importance changes
+        def update_masks_callback(mask_k: torch.Tensor, mask_v: torch.Tensor) -> None:
+            self.set_channel_masks(mask_k.tolist(), mask_v.tolist())
+
+        importance_mgr.set_mask_update_callback(update_masks_callback)
+
+        logger.info(
+            "Channel importance configured: layers=%d, heads=%d, head_dim=%d, "
+            "r_k=%d, r_v=%d",
+            num_layers,
+            num_heads,
+            head_dim,
+            r_k,
+            r_v,
+        )
+
+    def step_channel_importance(self) -> dict:
+        """
+        Step the importance tracker (call after each forward pass).
+        Returns summary statistics.
+        """
+        importance_mgr = ChannelImportanceManager.get()
+        importance_mgr.step()
+        return importance_mgr.get_summary()
+
+    def get_channel_importance_masks(self) -> tuple[list[float], list[float]] | None:
+        """
+        Get the current importance-based masks.
+        Returns (mask_k, mask_v) as lists, or None if not configured.
+        """
+        importance_mgr = ChannelImportanceManager.get()
+        if not importance_mgr.is_enabled:
+            return None
+        mask_k, mask_v = importance_mgr.compute_masks()
+        return mask_k.tolist(), mask_v.tolist()
+
+    def disable_channel_importance(self) -> None:
+        """Disable channel importance tracking."""
+        ChannelImportanceManager.get().disable()
 
     def load_model(self) -> None:
         """Load model onto target device."""

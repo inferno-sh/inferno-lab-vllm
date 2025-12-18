@@ -15,6 +15,7 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     MLAAttentionImpl,
 )
+from vllm.attention.channel_importance import ChannelImportanceManager
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layers.mm_encoder_attention import maybe_get_vit_flash_attn_backend
 from vllm.attention.selector import get_attn_backend
@@ -874,6 +875,15 @@ def unified_attention(
     layer_name: str,
 ) -> torch.Tensor:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
+    # Update channel importance tracking if enabled
+    importance_mgr = ChannelImportanceManager.get()
+    if importance_mgr.is_enabled and key is not None and value is not None:
+        importance_mgr.update(layer_name, key, value)
+    # Apply channel masks if present
+    if key is not None and self.channel_mask_k is not None:
+        key = key * self.channel_mask_k.to(device=key.device, dtype=key.dtype)
+    if value is not None and self.channel_mask_v is not None:
+        value = value * self.channel_mask_v.to(device=value.device, dtype=value.dtype)
     output = self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
     return output
@@ -906,6 +916,15 @@ def unified_attention_with_output(
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
+    # Update channel importance tracking if enabled
+    importance_mgr = ChannelImportanceManager.get()
+    if importance_mgr.is_enabled and key is not None and value is not None:
+        importance_mgr.update(layer_name, key, value)
+    # Apply channel masks if present
+    if key is not None and self.channel_mask_k is not None:
+        key = key * self.channel_mask_k.to(device=key.device, dtype=key.dtype)
+    if value is not None and self.channel_mask_v is not None:
+        value = value * self.channel_mask_v.to(device=value.device, dtype=value.dtype)
     self.impl.forward(
         self,
         query,

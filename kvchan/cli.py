@@ -94,6 +94,23 @@ def parse_args() -> argparse.Namespace:
         default=0.85,
         help="Jaccard overlap threshold for accepting new masks.",
     )
+    run_p.add_argument(
+        "--use_importance",
+        action="store_true",
+        help="Use importance-based channel selection (EMA of magnitudes) instead of naive first-N.",
+    )
+    run_p.add_argument(
+        "--importance_beta",
+        type=float,
+        default=0.98,
+        help="EMA decay factor for importance tracking (higher = slower adaptation).",
+    )
+    run_p.add_argument(
+        "--importance_warmup_tokens",
+        type=int,
+        default=64,
+        help="Tokens to wait before enabling compression (warmup period).",
+    )
 
     probe_p = sub.add_parser(
         "train-probe", help="Collect importance stats without compression."
@@ -163,6 +180,9 @@ def run():
             debug_force_all_ones_mask=args.debug_force_all_ones_mask,
             debug_skip_masks=args.debug_skip_masks,
             debug_step_baseline=args.debug_step_baseline,
+            use_importance=args.use_importance,
+            importance_beta=args.importance_beta,
+            importance_warmup_tokens=args.importance_warmup_tokens,
         )
         backend = build_backend(args.backend, args.model)
         results = []

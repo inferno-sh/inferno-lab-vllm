@@ -18,8 +18,18 @@ LOG = logging.getLogger(__name__)
 
 
 def _build_indices(head_dim: int, keep: int) -> List[int]:
+    """Build naive indices (first N channels). Used as fallback."""
     keep = min(keep, head_dim)
     return list(range(keep))
+
+
+def _indices_to_mask(indices: List[int], head_dim: int) -> torch.Tensor:
+    """Convert channel indices to a binary mask tensor."""
+    mask = torch.zeros(head_dim, dtype=torch.float32)
+    for idx in indices:
+        if 0 <= idx < head_dim:
+            mask[idx] = 1.0
+    return mask
 
 
 def _first_mismatch(a: List[int], b: List[int]) -> Optional[int]:
@@ -69,6 +79,10 @@ class VLLMBackend:
         # Disable prefix caching to avoid cross-request nondeterminism during
         # step-driven runs and mask debugging.
         llm_kwargs["enable_prefix_caching"] = False
+        # Disable torch.compile to allow runtime mask application.
+        # The unified_attention custom op is compiled away otherwise,
+        # preventing dynamic mask updates during inference.
+        llm_kwargs["enforce_eager"] = True
         self.llm = LLM(model=model_name, **llm_kwargs)
         self.tokenizer = self.llm.get_tokenizer()
         self.model_name = model_name
@@ -86,6 +100,35 @@ class VLLMBackend:
 
     def _clear_masks(self):
         self._apply_masks(None, None)
+
+    def _configure_importance(
+        self,
+        r_k: int,
+        r_v: int,
+        beta: float = 0.98,
+        update_interval: int = 32,
+        warmup_tokens: int = 64,
+    ) -> None:
+        """Configure importance tracking on workers."""
+        self.llm.llm_engine.collective_rpc(
+            "configure_channel_importance",
+            args=(r_k, r_v, beta, update_interval, warmup_tokens),
+        )
+
+    def _step_importance(self) -> List[Dict]:
+        """Step importance tracking and return summaries from all workers."""
+        return self.llm.llm_engine.collective_rpc("step_channel_importance")
+
+    def _get_importance_masks(self) -> Optional[Tuple[List[float], List[float]]]:
+        """Get current importance-based masks from workers."""
+        results = self.llm.llm_engine.collective_rpc("get_channel_importance_masks")
+        if results and results[0] is not None:
+            return results[0]
+        return None
+
+    def _disable_importance(self) -> None:
+        """Disable importance tracking on workers."""
+        self.llm.llm_engine.collective_rpc("disable_channel_importance")
 
     def run_prompt(
         self,
@@ -196,17 +239,45 @@ class VLLMBackend:
                 "backoff_token_idx": None,
             }
 
-        cand_idx_k = _build_indices(head_dim, k_keep)
-        cand_idx_v = _build_indices(head_dim, v_keep)
+        # Configure importance-based or naive channel selection
+        use_importance = cfg.use_importance and not force_full_k
+        importance_stats: Dict = {}
+
+        if use_importance:
+            # Configure importance tracking with warmup
+            LOG.info(
+                "Configuring importance tracking: r_k=%d, r_v=%d, warmup=%d",
+                k_keep,
+                v_keep,
+                cfg.importance_warmup_tokens,
+            )
+            self._configure_importance(
+                r_k=k_keep,
+                r_v=v_keep,
+                beta=cfg.importance_beta,
+                update_interval=cfg.update_interval,
+                warmup_tokens=cfg.importance_warmup_tokens,
+            )
+            # Start with all-ones masks during warmup phase
+            mask_k = torch.ones(head_dim, dtype=torch.float32)
+            mask_v = torch.ones(head_dim, dtype=torch.float32)
+            cand_idx_k = list(range(head_dim))
+            cand_idx_v = list(range(head_dim))
+        else:
+            cand_idx_k = _build_indices(head_dim, k_keep)
+            cand_idx_v = _build_indices(head_dim, v_keep)
+
         stable_ctrl.initialize(cand_idx_k, cand_idx_v)
-        # Build masks. For small heads, use all-ones to exercise the plumbing
-        # without changing outputs.
-        mask_k, mask_v = stable_ctrl.masks(
-            head_dim, cfg.disable_k_compress, cfg.disable_v_compress
-        )
-        if force_full_k and v_keep == head_dim:
-            mask_k = torch.ones_like(mask_k) if mask_k is not None else None
-            mask_v = torch.ones_like(mask_v) if mask_v is not None else None
+
+        if not use_importance:
+            # Build masks from naive indices
+            mask_k, mask_v = stable_ctrl.masks(
+                head_dim, cfg.disable_k_compress, cfg.disable_v_compress
+            )
+            if force_full_k and v_keep == head_dim:
+                mask_k = torch.ones_like(mask_k) if mask_k is not None else None
+                mask_v = torch.ones_like(mask_v) if mask_v is not None else None
+
         if cfg.debug_force_all_ones_mask:
             mask_k = torch.ones_like(mask_k) if mask_k is not None else None
             mask_v = torch.ones_like(mask_v) if mask_v is not None else None
@@ -214,7 +285,7 @@ class VLLMBackend:
             not cfg.debug_skip_masks
         )
 
-        # Apply initial stable masks and drive the engine manually for mid-gen updates.
+        # Apply initial masks and drive the engine manually for mid-gen updates.
         if apply_masks:
             self._apply_masks(mask_k, mask_v)
         else:
@@ -240,6 +311,13 @@ class VLLMBackend:
         masked_token_ids: List[int] = []
         while self.llm.llm_engine.has_unfinished_requests():
             step_outputs = self.llm.llm_engine.step()
+
+            # Step importance tracking (triggers mask updates via callback)
+            if use_importance:
+                step_stats = self._step_importance()
+                if step_stats:
+                    importance_stats = step_stats[0]  # From first worker
+
             for out in step_outputs:
                 if not out.outputs:
                     continue
@@ -255,7 +333,8 @@ class VLLMBackend:
                         if out.prompt_token_ids
                         else prompt_tokens
                     )
-                if stable_ctrl.should_update(masked_gen_tokens):
+                # Only use stable_ctrl for non-importance mode
+                if not use_importance and stable_ctrl.should_update(masked_gen_tokens):
                     cand_idx_k = _build_indices(head_dim, k_keep)
                     cand_idx_v = _build_indices(head_dim, v_keep)
                     changed, ov_k, ov_v = stable_ctrl.maybe_update(
@@ -274,8 +353,10 @@ class VLLMBackend:
                         )
                         self._apply_masks(mask_k, mask_v)
 
-        # Clear masks to avoid leaking to future runs.
+        # Clean up
         self._clear_masks()
+        if use_importance:
+            self._disable_importance()
 
         fidelity = {
             "match": full_text == masked_text,
@@ -304,8 +385,8 @@ class VLLMBackend:
             "mask_v_kept": v_keep,
             "fidelity": fidelity,
             "head_dim": head_dim,
-            "mask_k_effective": len(cand_idx_k),
-            "mask_v_effective": len(cand_idx_v),
+            "mask_k_effective": k_keep if use_importance else len(cand_idx_k),
+            "mask_v_effective": v_keep if use_importance else len(cand_idx_v),
             "prompt_tokens": prompt_tokens,
             "generated_tokens_full": full_gen_tokens,
             "generated_tokens_masked": masked_gen_tokens,
@@ -325,4 +406,6 @@ class VLLMBackend:
             "stable_mask_avg_overlap": stats.avg_overlap,
             "first_mismatch_token_idx": first_mismatch,
             "backoff_token_idx": backoff_token_idx,
+            "use_importance": use_importance,
+            "importance_stats": importance_stats,
         }
