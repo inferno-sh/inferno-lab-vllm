@@ -54,6 +54,7 @@ from vllm.config import (
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
+    TensorDedupConfig,
     VllmConfig,
     get_attr_docs,
 )
@@ -488,6 +489,7 @@ class EngineArgs:
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
+    tensor_dedup: TensorDedupConfig | None = LoadConfig.tensor_dedup
 
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
@@ -1275,6 +1277,7 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
             pt_load_map_location=self.pt_load_map_location,
+            tensor_dedup=self.tensor_dedup,
         )
 
     def create_speculative_config(

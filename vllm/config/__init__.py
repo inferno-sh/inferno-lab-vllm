@@ -13,7 +13,7 @@ from vllm.config.device import DeviceConfig
 from vllm.config.ec_transfer import ECTransferConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
-from vllm.config.load import LoadConfig
+from vllm.config.load import LoadConfig, TensorDedupConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.model import (
     ModelConfig,
@@ -67,6 +67,7 @@ __all__ = [
     "KVTransferConfig",
     # From vllm.config.load
     "LoadConfig",
+    "TensorDedupConfig",
     # From vllm.config.lora
     "LoRAConfig",
     # From vllm.config.model
