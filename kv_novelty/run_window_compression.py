@@ -54,10 +54,16 @@ def main():
         help="Compression method",
     )
     parser.add_argument(
-        "--rank-ratio",
+        "--rank-ratio-k",
         type=float,
         default=0.5,
-        help="For low_rank: fraction of singular values to keep (default: 0.5)",
+        help="For low_rank: fraction of singular values to keep for K (default: 0.5)",
+    )
+    parser.add_argument(
+        "--rank-ratio-v",
+        type=float,
+        default=None,
+        help="For low_rank: fraction of singular values to keep for V (default: same as K)",
     )
     parser.add_argument(
         "--novelty-threshold",
@@ -114,8 +120,11 @@ def main():
 
     prompt = args.prompt if args.prompt else PROMPTS[args.prompt_type]
 
+    # Default V ratio to K ratio if not specified
+    rank_ratio_v = args.rank_ratio_v if args.rank_ratio_v is not None else args.rank_ratio_k
+
     if args.sweep:
-        rank_ratios = [0.25, 0.5, 0.75]
+        rank_ratios_k = [0.25, 0.5, 0.75]
         results = []
 
         print("\n" + "=" * 70)
@@ -123,15 +132,17 @@ def main():
         print("=" * 70)
         print(f"Model: {args.model}")
         print(f"Method: {args.method}")
-        print(f"Rank ratios: {rank_ratios}")
+        print(f"Rank ratios K: {rank_ratios_k}")
+        print(f"Rank ratio V: {rank_ratio_v} (fixed)")
         print("=" * 70)
 
-        for ratio in rank_ratios:
-            print(f"\n--- Rank ratio {ratio} ---")
+        for ratio_k in rank_ratios_k:
+            print(f"\n--- Rank K={ratio_k}, V={rank_ratio_v} ---")
 
             config = WindowCompressionConfig(
                 method=CompressionMethod(args.method),
-                rank_ratio=ratio,
+                rank_ratio_k=ratio_k,
+                rank_ratio_v=rank_ratio_v,
                 novelty_threshold=args.novelty_threshold,
                 window_size=args.window_size,
             )
@@ -145,7 +156,8 @@ def main():
             )
 
             results.append({
-                "rank_ratio": ratio,
+                "rank_ratio_k": ratio_k,
+                "rank_ratio_v": rank_ratio_v,
                 "windows_compressed": result.windows_compressed,
                 "compression_ratio": result.compression_ratio,
                 "loss_increase_pct": result.loss_increase_pct,
@@ -161,12 +173,11 @@ def main():
         print("\n" + "=" * 70)
         print("SWEEP SUMMARY")
         print("=" * 70)
-        print(f"{'Rank':<8} {'Windows':<10} {'Loss Δ%':<12} {'Mean |Δlp|':<12} {'Recon Err':<12}")
-        print("-" * 55)
+        print(f"{'Rank K':<8} {'Rank V':<8} {'Windows':<10} {'Loss Δ%':<12} {'Mean |Δlp|':<12}")
+        print("-" * 60)
         for r in results:
-            print(f"{r['rank_ratio']:<8} {r['windows_compressed']:<10} "
-                  f"{r['loss_increase_pct']:<12.2f} {r['mean_logprob_delta']:<12.4f} "
-                  f"{r['reconstruction_error']:<12.4f}")
+            print(f"{r['rank_ratio_k']:<8} {r['rank_ratio_v']:<8} {r['windows_compressed']:<10} "
+                  f"{r['loss_increase_pct']:<12.2f} {r['mean_logprob_delta']:<12.4f}")
 
         if args.output:
             args.output.mkdir(parents=True, exist_ok=True)
@@ -176,7 +187,8 @@ def main():
     else:
         config = WindowCompressionConfig(
             method=CompressionMethod(args.method),
-            rank_ratio=args.rank_ratio,
+            rank_ratio_k=args.rank_ratio_k,
+            rank_ratio_v=rank_ratio_v,
             novelty_threshold=args.novelty_threshold,
             window_size=args.window_size,
         )
@@ -186,7 +198,8 @@ def main():
         print("=" * 70)
         print(f"Model: {args.model}")
         print(f"Method: {args.method}")
-        print(f"Rank ratio: {args.rank_ratio}")
+        print(f"Rank ratio K: {args.rank_ratio_k}")
+        print(f"Rank ratio V: {rank_ratio_v}")
         print(f"Novelty threshold: {args.novelty_threshold}%")
         print("=" * 70)
 

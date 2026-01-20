@@ -43,7 +43,8 @@ class WindowCompressionConfig:
     method: CompressionMethod = CompressionMethod.LOW_RANK
 
     # Low-rank parameters
-    rank_ratio: float = 0.5  # Keep this fraction of singular values
+    rank_ratio_k: float = 0.5  # Keep this fraction of singular values for K
+    rank_ratio_v: float = 0.5  # Keep this fraction of singular values for V (None = same as K)
     min_rank: int = 2  # Minimum rank to preserve
 
     # Clustering parameters
@@ -155,12 +156,19 @@ class KVWindowCompressor:
         """
         num_heads, window_len, head_dim = k_window.shape
 
-        # Determine rank
-        target_rank = max(
+        # Determine rank for K
+        target_rank_k = max(
             self.config.min_rank,
-            int(window_len * self.config.rank_ratio)
+            int(window_len * self.config.rank_ratio_k)
         )
-        target_rank = min(target_rank, window_len, head_dim)
+        target_rank_k = min(target_rank_k, window_len, head_dim)
+
+        # Determine rank for V
+        target_rank_v = max(
+            self.config.min_rank,
+            int(window_len * self.config.rank_ratio_v)
+        )
+        target_rank_v = min(target_rank_v, window_len, head_dim)
 
         k_compressed_list = []
         v_compressed_list = []
@@ -177,10 +185,10 @@ class KVWindowCompressor:
                 k_h_f32 = k_h.float()
                 U, S, Vh = torch.linalg.svd(k_h_f32, full_matrices=False)
 
-                # Keep top-k components
-                U_k = U[:, :target_rank]  # [window_len, rank]
-                S_k = S[:target_rank]  # [rank]
-                Vh_k = Vh[:target_rank, :]  # [rank, head_dim]
+                # Keep top-k components for K
+                U_k = U[:, :target_rank_k]  # [window_len, rank]
+                S_k = S[:target_rank_k]  # [rank]
+                Vh_k = Vh[:target_rank_k, :]  # [rank, head_dim]
 
                 # Reconstruct with reduced rank
                 k_reconstructed = U_k @ torch.diag(S_k) @ Vh_k  # [window_len, head_dim]
@@ -197,15 +205,14 @@ class KVWindowCompressor:
                 k_compressed_list.append(k_h)
                 reconstruction_errors.append(0.0)
 
-            # Apply same transformation to V for consistency
-            # (In practice, might want independent compression)
+            # Apply SVD to V with potentially different rank
             if self.config.compress_values:
                 try:
                     v_h_f32 = v_h.float()
                     U_v, S_v, Vh_v = torch.linalg.svd(v_h_f32, full_matrices=False)
-                    U_vk = U_v[:, :target_rank]
-                    S_vk = S_v[:target_rank]
-                    Vh_vk = Vh_v[:target_rank, :]
+                    U_vk = U_v[:, :target_rank_v]
+                    S_vk = S_v[:target_rank_v]
+                    Vh_vk = Vh_v[:target_rank_v, :]
                     v_reconstructed = U_vk @ torch.diag(S_vk) @ Vh_vk
                     v_compressed_list.append(v_reconstructed.to(original_dtype))
                 except Exception:
@@ -219,7 +226,8 @@ class KVWindowCompressor:
         metadata = {
             "method": "low_rank",
             "original_len": window_len,
-            "target_rank": target_rank,
+            "target_rank_k": target_rank_k,
+            "target_rank_v": target_rank_v,
             "mean_reconstruction_error": np.mean(reconstruction_errors),
         }
 
