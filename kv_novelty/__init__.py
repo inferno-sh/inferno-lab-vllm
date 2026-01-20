@@ -34,6 +34,12 @@ from .kv_experiments import (
     run_kv_experiment,
     print_experiment_summary,
 )
+from .kv_compression import (
+    CompressionConfig,
+    CompressionResult,
+    run_compression_experiment,
+    print_compression_results,
+)
 
 __all__ = [
     # Original collector/hooks
@@ -59,6 +65,11 @@ __all__ = [
     "KVExperimentResult",
     "run_kv_experiment",
     "print_experiment_summary",
+    # Compression
+    "CompressionConfig",
+    "CompressionResult",
+    "run_compression_experiment",
+    "print_compression_results",
 ]
 
 __version__ = "0.2.0"
