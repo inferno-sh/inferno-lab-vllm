@@ -40,6 +40,14 @@ from .kv_compression import (
     run_compression_experiment,
     print_compression_results,
 )
+from .kv_window_compression import (
+    WindowCompressionConfig,
+    WindowCompressionResult,
+    CompressionMethod,
+    KVWindowCompressor,
+    run_window_compression_experiment,
+    print_window_compression_results,
+)
 
 __all__ = [
     # Original collector/hooks
@@ -70,6 +78,13 @@ __all__ = [
     "CompressionResult",
     "run_compression_experiment",
     "print_compression_results",
+    # Window compression
+    "WindowCompressionConfig",
+    "WindowCompressionResult",
+    "CompressionMethod",
+    "KVWindowCompressor",
+    "run_window_compression_experiment",
+    "print_window_compression_results",
 ]
 
 __version__ = "0.2.0"
