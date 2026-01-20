@@ -166,13 +166,16 @@ class KVWindowCompressor:
         v_compressed_list = []
         reconstruction_errors = []
 
+        original_dtype = k_window.dtype
+
         for h in range(num_heads):
             k_h = k_window[h]  # [window_len, head_dim]
             v_h = v_window[h]
 
-            # SVD on K
+            # SVD on K (convert to float32 as SVD doesn't support bfloat16)
             try:
-                U, S, Vh = torch.linalg.svd(k_h, full_matrices=False)
+                k_h_f32 = k_h.float()
+                U, S, Vh = torch.linalg.svd(k_h_f32, full_matrices=False)
 
                 # Keep top-k components
                 U_k = U[:, :target_rank]  # [window_len, rank]
@@ -182,15 +185,12 @@ class KVWindowCompressor:
                 # Reconstruct with reduced rank
                 k_reconstructed = U_k @ torch.diag(S_k) @ Vh_k  # [window_len, head_dim]
 
-                # For a true compression, we'd store U_k, S_k, Vh_k separately
-                # But for this experiment, we just use the reconstructed K
-                # to measure quality impact
-
-                # Compute reconstruction error
-                error = torch.norm(k_h - k_reconstructed) / torch.norm(k_h)
+                # Compute reconstruction error (in float32)
+                error = torch.norm(k_h_f32 - k_reconstructed) / torch.norm(k_h_f32)
                 reconstruction_errors.append(error.item())
 
-                k_compressed_list.append(k_reconstructed)
+                # Convert back to original dtype
+                k_compressed_list.append(k_reconstructed.to(original_dtype))
 
             except Exception:
                 # SVD failed, keep original
@@ -201,12 +201,13 @@ class KVWindowCompressor:
             # (In practice, might want independent compression)
             if self.config.compress_values:
                 try:
-                    U_v, S_v, Vh_v = torch.linalg.svd(v_h, full_matrices=False)
+                    v_h_f32 = v_h.float()
+                    U_v, S_v, Vh_v = torch.linalg.svd(v_h_f32, full_matrices=False)
                     U_vk = U_v[:, :target_rank]
                     S_vk = S_v[:target_rank]
                     Vh_vk = Vh_v[:target_rank, :]
                     v_reconstructed = U_vk @ torch.diag(S_vk) @ Vh_vk
-                    v_compressed_list.append(v_reconstructed)
+                    v_compressed_list.append(v_reconstructed.to(original_dtype))
                 except Exception:
                     v_compressed_list.append(v_h)
             else:
@@ -329,11 +330,9 @@ class KVWindowCompressor:
         else:
             legacy_cache = past_key_values
 
-        # Adjust novelty scores to exclude prompt
-        gen_novelty = novelty_scores[prompt_len:] if prompt_len > 0 else novelty_scores
-
         # Identify compression windows
-        windows = self.identify_compression_windows(gen_novelty)
+        # Note: novelty_scores should already be for generated tokens only (not including prompt)
+        windows = self.identify_compression_windows(novelty_scores)
 
         if not windows:
             return past_key_values, {"windows_compressed": 0}
